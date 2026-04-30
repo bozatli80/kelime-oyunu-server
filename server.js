@@ -96,30 +96,42 @@ io.on('connection', (socket) => {
         }
     });
 
-    // --- 4. ODAYA KATILMA (ÖĞRENCİ) ---
-    socket.on('join_room', (data) => {
+    // --- ÖĞRENCİ YENİDEN BAĞLANMA (TAB DEĞİŞTİRME / EKRAN KAPANMA KORUMASI) ---
+    socket.on('student_reconnect', (data) => {
         const { roomCode, playerName } = data;
         const room = rooms[roomCode];
 
-        if (!room) return socket.emit('join_error', { message: '❌ Oda bulunamadı veya süresi doldu!' });
-        if (room.status !== 'waiting') return socket.emit('join_error', { message: '⛔ Yarışma çoktan başladı!' });
-        if (!isNameClean(playerName)) return socket.emit('join_error', { message: '⚠️ Lütfen uygun bir isim kullanın!' });
+        if (room) {
+            // Öğrencinin adından eski kimliğini (socket.id) bul
+            const oldSocketId = Object.keys(room.players).find(key => room.players[key].name === playerName);
 
-        socket.join(roomCode);
-        room.players[socket.id] = {
-            id: socket.id,
-            name: playerName,
-            score: 0,
-            combo: 0,
-            correct: 0, 
-            wrong: 0,   
-            currentIndex: 0,
-            status: 'waiting',
-            lastQuestionSentAt: 0
-        };
+            if (oldSocketId) {
+                let playerObj = room.players[oldSocketId];
+                if(!playerObj) return;
 
-        socket.emit('join_success', { roomCode: roomCode });
-        io.to(roomCode).emit('lobby_update', Object.values(room.players));
+                // ID'leri güncelle ve durumu 'playing' yap
+                playerObj.id = socket.id;
+                playerObj.status = room.status === 'playing' ? 'playing' : 'waiting';
+                
+                delete room.players[oldSocketId];
+                room.players[socket.id] = playerObj;
+                socket.join(roomCode);
+
+                socket.emit('join_success', { roomCode: roomCode });
+
+                if (room.status === 'playing') {
+                    // ÖNEMLİ: Öğretmenin ekranında "Ayrıldı" yazısını anında siler
+                    requestLeaderboardUpdate(roomCode); 
+                    
+                    // Öğrenciye direkt kaldığı soruyu fırlat
+                    sendIndividualQuestion(roomCode, socket.id);
+                } else {
+                    io.to(roomCode).emit('lobby_update', Object.values(room.players));
+                }
+            } else {
+                socket.emit('join_error', { message: 'Bağlantınız tamamen koptu. Lütfen tekrar isim yazarak girin.' });
+            }
+        }
     });
 
     // --- 5. OYUNU BAŞLATMA ---
