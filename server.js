@@ -8,7 +8,9 @@ app.use(cors());
 
 const server = http.createServer(app);
 const io = new Server(server, {
-    cors: { origin: "*", methods: ["GET", "POST"] }
+    cors: { origin: "*", methods: ["GET", "POST"] },
+    pingTimeout: 60000, // 60 saniye ping bekleme süresi (Ekran kapansa da atmaz)
+    pingInterval: 25000 // 25 saniyede bir kontrol et
 });
 
 const rooms = {};
@@ -92,6 +94,50 @@ io.on('connection', (socket) => {
                     requestLeaderboardUpdate(roomCode);
                     checkIfGameOver(roomCode);
                 }
+            }
+        }
+    });
+
+    // --- ÖĞRENCİ YENİDEN BAĞLANMA (TAB DEĞİŞTİRME / EKRAN KAPANMA KORUMASI) ---
+    socket.on('student_reconnect', (data) => {
+        const { roomCode, playerName } = data;
+        const room = rooms[roomCode];
+
+        if (room) {
+            // Öğrencinin adından eski kimliğini (socket.id) bul
+            const oldSocketId = Object.keys(room.players).find(key => room.players[key].name === playerName);
+
+            if (oldSocketId) {
+                let playerObj = room.players[oldSocketId];
+                if(!playerObj) return;
+
+                // Geri döndüğü için 20 saniyelik atılma sayacını iptal et!
+                if (playerObj.studentDisconnectTimeout) {
+                    clearTimeout(playerObj.studentDisconnectTimeout);
+                    playerObj.studentDisconnectTimeout = null;
+                }
+
+                // ID'leri güncelle ve durumu 'playing' yap
+                playerObj.id = socket.id;
+                playerObj.status = room.status === 'playing' ? 'playing' : 'waiting';
+                
+                delete room.players[oldSocketId];
+                room.players[socket.id] = playerObj;
+                socket.join(roomCode);
+
+                socket.emit('join_success', { roomCode: roomCode });
+
+                if (room.status === 'playing') {
+                    // Öğretmenin ekranında "Ayrıldı" yazısını anında siler
+                    requestLeaderboardUpdate(roomCode); 
+                    
+                    // Öğrenciye direkt kaldığı soruyu fırlat
+                    sendIndividualQuestion(roomCode, socket.id);
+                } else {
+                    io.to(roomCode).emit('lobby_update', Object.values(room.players));
+                }
+            } else {
+                socket.emit('join_error', { message: 'Bağlantınız tamamen koptu. Lütfen tekrar isim yazarak girin.' });
             }
         }
     });
@@ -258,10 +304,15 @@ io.on('connection', (socket) => {
                 }, 60000); // 60 Saniye süre verir
 
             } else if (room.players[socket.id]) {
-                // ÖĞRENCİ KOPTU: Hayalet oyuncu olarak kalır (Puanı ve ismi silinmez)
-                room.players[socket.id].status = 'left';
-                requestLeaderboardUpdate(roomCode);
-                checkIfGameOver(roomCode);
+                // ÖĞRENCİ KOPTU: Anında silme, 20 SANİYE TOLERANS TANI!
+                room.players[socket.id].studentDisconnectTimeout = setTimeout(() => {
+                    // 20 saniye içinde geri dönmezse öğretmenin ekranında "Ayrıldı" yaz.
+                    if (rooms[roomCode] && rooms[roomCode].players[socket.id]) {
+                        rooms[roomCode].players[socket.id].status = 'left';
+                        requestLeaderboardUpdate(roomCode);
+                        checkIfGameOver(roomCode);
+                    }
+                }, 20000); 
             }
         }
     });
