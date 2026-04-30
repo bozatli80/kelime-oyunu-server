@@ -12,9 +12,8 @@ const io = new Server(server, {
 });
 
 const rooms = {};
-const leaderboardTimers = {}; // Sıralama güncellemelerini yavaşlatıp sunucuyu korur
+const leaderboardTimers = {};
 
-// Küfür Filtresi (Eğer öğrenci bu kelimelerle girmeye çalışırsa reddedilir)
 const badWords = ["amk", "aq", "oç", "sik", "siktir", "pic", "yavsak", "fuck", "bitch", "pussy"];
 function isNameClean(name) {
     const cleanName = name.replace(/[^a-zA-Zğüşıöç]/gi, '').toLowerCase();
@@ -23,101 +22,95 @@ function isNameClean(name) {
 
 io.on('connection', (socket) => {
     
-    // --- 1. ODA OLUŞTURMA (ÖĞRETMEN) ---
+    // --- 1. ODA OLUŞTURMA ---
     socket.on('create_room', () => {
         const roomCode = Math.floor(100000 + Math.random() * 900000).toString();
         rooms[roomCode] = { 
             teacherSocketId: socket.id,
-            teacherDisconnectTimeout: null, // Kopma toleransı (Sayfa yenileme için)
-            players: {}, 
-            questions: [], 
-            status: 'waiting' 
+            teacherDisconnectTimeout: null,
+            players: {}, questions: [], status: 'waiting' 
         };
         socket.join(roomCode); 
         socket.emit('room_created', { roomCode: roomCode });
     });
 
-    // --- 2. ÖĞRETMEN YENİDEN BAĞLANMA (SAYFA YENİLEME KORUMASI) ---
+    // --- 2. ÖĞRETMEN YENİDEN BAĞLANMA ---
     socket.on('teacher_reconnect', (data) => {
         const { roomCode } = data;
         const room = rooms[roomCode];
-        
         if (room) {
-            // Eğer öğretmen için silinme sayacı başladıysa iptal et
             if (room.teacherDisconnectTimeout) {
                 clearTimeout(room.teacherDisconnectTimeout);
                 room.teacherDisconnectTimeout = null;
             }
-
-            room.teacherSocketId = socket.id; // Yeni soketi kaydet
+            room.teacherSocketId = socket.id; 
             socket.join(roomCode);
-            
-            // Öğretmene odanın güncel durumunu gönder (Ön yüze yansır)
-            socket.emit('teacher_reconnected_success', {
-                status: room.status,
-                players: Object.values(room.players)
-            });
-
-            // Ekranı güncelle
-            if (room.status === 'waiting') {
-                socket.emit('lobby_update', Object.values(room.players));
-            } else if (room.status === 'playing') {
-                socket.emit('update_leaderboard', Object.values(room.players).sort((a,b) => b.score - a.score));
-            }
+            socket.emit('teacher_reconnected_success', { status: room.status, players: Object.values(room.players) });
+            if (room.status === 'waiting') socket.emit('lobby_update', Object.values(room.players));
+            else if (room.status === 'playing') socket.emit('update_leaderboard', Object.values(room.players).sort((a,b) => b.score - a.score));
         }
     });
 
-    // --- 3. ÖĞRENCİYİ ODADAN ATMA (KICK) ---
+    // --- 3. ÖĞRENCİYİ ATMA ---
     socket.on('kick_player', (data) => {
         const { roomCode, playerId } = data;
         const room = rooms[roomCode];
-
-        // İsteğin gerçekten o odanın öğretmeninden geldiğinden emin ol
         if (room && room.teacherSocketId === socket.id) {
             if (room.players[playerId]) {
-                // 1. Hedef öğrenciye atıldığını bildir (Öğrenci ana sayfaya atılır)
                 io.to(playerId).emit('kicked_out', 'Öğretmen tarafından odadan çıkarıldınız.');
-                
-                // 2. Odanın hafızasından sil
                 delete room.players[playerId];
-
-                // 3. Hedef öğrenciyi Socket.io odasından çıkar
                 const targetSocket = io.sockets.sockets.get(playerId);
                 if (targetSocket) targetSocket.leave(roomCode);
-
-                // 4. Öğretmenin ve diğer öğrencilerin listesini anında güncelle
-                if (room.status === 'waiting') {
-                    io.to(roomCode).emit('lobby_update', Object.values(room.players));
-                } else if (room.status === 'playing') {
-                    requestLeaderboardUpdate(roomCode);
-                    checkIfGameOver(roomCode);
-                }
+                if (room.status === 'waiting') io.to(roomCode).emit('lobby_update', Object.values(room.players));
+                else if (room.status === 'playing') { requestLeaderboardUpdate(roomCode); checkIfGameOver(roomCode); }
             }
         }
     });
 
-    // --- 4. ODAYA KATILMA (ÖĞRENCİ) ---
-    socket.on('join_room', (data) => {
+    // --- ÖĞRENCİ YENİDEN BAĞLANMA (MÜKEMMEL GERİ DÖNÜŞ) ---
+    socket.on('student_reconnect', (data) => {
         const { roomCode, playerName } = data;
         const room = rooms[roomCode];
 
+        if (room) {
+            const oldSocketId = Object.keys(room.players).find(key => room.players[key].name === playerName);
+            if (oldSocketId) {
+                let playerObj = room.players[oldSocketId];
+                if(!playerObj) return;
+
+                // Eski ID'yi sil, yenisini ver. Statüyü "playing" yap!
+                playerObj.id = socket.id;
+                playerObj.status = room.status === 'playing' ? 'playing' : 'waiting';
+                
+                delete room.players[oldSocketId];
+                room.players[socket.id] = playerObj;
+                socket.join(roomCode);
+
+                socket.emit('join_success', { roomCode: roomCode });
+
+                if (room.status === 'playing') {
+                    requestLeaderboardUpdate(roomCode); 
+                    // Oyuncuya kaldığı soruyu "Kilitleri açılmış halde" geri yolla
+                    sendIndividualQuestion(roomCode, socket.id);
+                } else {
+                    io.to(roomCode).emit('lobby_update', Object.values(room.players));
+                }
+            } else {
+                socket.emit('join_error', { message: 'Öğretmen odayı kapatmış olabilir. Lütfen tekrar girin.' });
+            }
+        }
+    });
+
+    // --- 4. ODAYA KATILMA ---
+    socket.on('join_room', (data) => {
+        const { roomCode, playerName } = data;
+        const room = rooms[roomCode];
         if (!room) return socket.emit('join_error', { message: '❌ Oda bulunamadı veya süresi doldu!' });
         if (room.status !== 'waiting') return socket.emit('join_error', { message: '⛔ Yarışma çoktan başladı!' });
         if (!isNameClean(playerName)) return socket.emit('join_error', { message: '⚠️ Lütfen uygun bir isim kullanın!' });
 
         socket.join(roomCode);
-        room.players[socket.id] = {
-            id: socket.id,
-            name: playerName,
-            score: 0,
-            combo: 0,
-            correct: 0, 
-            wrong: 0,   
-            currentIndex: 0,
-            status: 'waiting',
-            lastQuestionSentAt: 0
-        };
-
+        room.players[socket.id] = { id: socket.id, name: playerName, score: 0, combo: 0, correct: 0, wrong: 0, currentIndex: 0, status: 'waiting', lastQuestionSentAt: 0 };
         socket.emit('join_success', { roomCode: roomCode });
         io.to(roomCode).emit('lobby_update', Object.values(room.players));
     });
@@ -127,66 +120,44 @@ io.on('connection', (socket) => {
         const { roomCode, questions } = data;
         const room = rooms[roomCode];
         if (room && room.teacherSocketId === socket.id) {
-            room.questions = questions;
-            room.status = 'playing';
-            
-            // Her öğrenci için soruları karıştır
+            room.questions = questions; room.status = 'playing';
             Object.keys(room.players).forEach(pId => {
                 let order = Array.from({length: questions.length}, (_, i) => i);
                 room.players[pId].shuffledOrder = order.sort(() => Math.random() - 0.5);
                 room.players[pId].status = 'playing';
             });
-
             io.to(roomCode).emit('game_starting');
-            
-            // 4.5 Saniye sonra ilk soruları gönder (3-2-1 Fight sesi bitsin diye)
-            setTimeout(() => {
-                Object.keys(room.players).forEach(pId => sendIndividualQuestion(roomCode, pId));
-            }, 4500);
+            setTimeout(() => { Object.keys(room.players).forEach(pId => sendIndividualQuestion(roomCode, pId)); }, 4500);
         }
     });
 
-    // --- 6. KİŞİYE ÖZEL SORU GÖNDERME ---
     function sendIndividualQuestion(roomCode, pId) {
         const room = rooms[roomCode];
         if (!room) return;
         const player = room.players[pId];
         
-        // Soruları bitirmişse veya kopmuşsa bitir
         if (!player || player.currentIndex >= room.questions.length) {
-            if(player && player.status !== 'left') player.status = 'finished';
+            if(player && player.status !== 'disconnected') player.status = 'finished';
             io.to(pId).emit('player_finished');
             requestLeaderboardUpdate(roomCode);
             checkIfGameOver(roomCode);
             return;
         }
-
         const questionIndex = player.shuffledOrder[player.currentIndex];
         const q = room.questions[questionIndex];
         player.lastQuestionSentAt = Date.now();
-
-        io.to(pId).emit('new_question', {
-            questionText: q.questionText,
-            options: q.options,
-            qNum: player.currentIndex + 1,
-            total: room.questions.length
-        });
+        io.to(pId).emit('new_question', { questionText: q.questionText, options: q.options, qNum: player.currentIndex + 1, total: room.questions.length });
     }
 
-    // --- 7. OYUN BİTTİ Mİ KONTROLÜ ---
     function checkIfGameOver(roomCode) {
         const room = rooms[roomCode];
         if (!room) return;
-        
-        // Herkes bitirdi mi (finished) veya koptu mu (left) kontrolü
-        const allFinished = Object.values(room.players).every(p => p.status === 'finished' || p.status === 'left');
-        
+        // OYUNUN BİTMESİ İÇİN KİMSENİN "PLAYING" DURUMUNDA OLMAMASI LAZIM. "Disconnected" olanları bekleriz!
+        const allFinished = Object.values(room.players).every(p => p.status === 'finished');
         if (allFinished && Object.keys(room.players).length > 0) {
             room.status = 'finished';
             if (leaderboardTimers[roomCode]) clearTimeout(leaderboardTimers[roomCode]);
-            io.to(roomCode).emit('game_over', { 
-                leaderboard: Object.values(room.players).sort((a,b) => b.score - a.score) 
-            });
+            io.to(roomCode).emit('game_over', { leaderboard: Object.values(room.players).sort((a,b) => b.score - a.score) });
         }
     }
 
@@ -202,71 +173,54 @@ io.on('connection', (socket) => {
         let isCorrect = (selectedOption === currentQ.correctAnswer);
 
         if (isCorrect) {
-            player.correct++;
-            player.combo++;
+            player.correct++; player.combo++;
             const timeBonus = Math.max(0, 10000 - responseTime) * 0.05; 
-            const comboBonus = player.combo * 50;
-            const earnedPoints = Math.floor(500 + timeBonus + comboBonus);
-            player.score += earnedPoints;
-            socket.emit('answer_feedback', { isCorrect: true, earnedPoints, totalScore: player.score, combo: player.combo });
+            player.score += Math.floor(500 + timeBonus + (player.combo * 50));
+            socket.emit('answer_feedback', { isCorrect: true, earnedPoints: Math.floor(500 + timeBonus + (player.combo * 50)), totalScore: player.score, combo: player.combo });
         } else {
-            player.wrong++;
-            player.combo = 0;
-            player.score = Math.max(0, player.score - 500); // YANLIŞ CEVAP -500 PUAN
+            player.wrong++; player.combo = 0;
+            player.score = Math.max(0, player.score - 500); 
             socket.emit('answer_feedback', { isCorrect: false, earnedPoints: -500, totalScore: player.score, combo: 0 });
         }
         
         requestLeaderboardUpdate(roomCode);
         player.currentIndex++;
-        
-        // 1.5 Saniye sonra diğer soruya geç (Cevabın görülmesi için bekleme)
         setTimeout(() => sendIndividualQuestion(roomCode, socket.id), 1500);
     });
 
-    // --- LİDERLİK TABLOSUNU YAVAŞLATARAK GÜNCELLE (Sunucu Performansı İçin) ---
     function requestLeaderboardUpdate(roomCode) {
         if (leaderboardTimers[roomCode]) return;
         leaderboardTimers[roomCode] = setTimeout(() => {
             const room = rooms[roomCode];
-            if (room) {
-                io.to(roomCode).emit('update_leaderboard', Object.values(room.players).sort((a,b) => b.score - a.score));
-            }
+            if (room) io.to(roomCode).emit('update_leaderboard', Object.values(room.players).sort((a,b) => b.score - a.score));
             delete leaderboardTimers[roomCode];
-        }, 1000); // Saniyede sadece 1 kez tüm sınıfa veri yollar (Sunucuyu çökmesini engeller)
+        }, 1000); 
     }
 
-    // --- ÖĞRETMEN OYUNU ZORLA BİTİRİR ---
     socket.on('teacher_force_quit', (roomCode) => {
         if(rooms[roomCode] && rooms[roomCode].teacherSocketId === socket.id) {
-            io.to(roomCode).emit('game_over', { 
-                leaderboard: Object.values(rooms[roomCode].players).sort((a,b) => b.score - a.score) 
-            });
+            io.to(roomCode).emit('game_over', { leaderboard: Object.values(rooms[roomCode].players).sort((a,b) => b.score - a.score) });
             delete rooms[roomCode];
         }
     });
 
-    // --- 9. KOPMA YÖNETİMİ (DISCONNECT) ---
+    // --- KOPMA YÖNETİMİ (OYUNDAN ASLA ATMA) ---
     socket.on('disconnect', () => {
         for (const roomCode in rooms) {
             const room = rooms[roomCode];
-            
             if (room.teacherSocketId === socket.id) {
-                // ÖĞRETMEN KOPTU VEYA SAYFAYI YENİLEDİ: Hemen silme, 60 saniye bekle!
                 room.teacherDisconnectTimeout = setTimeout(() => {
                     io.to(roomCode).emit('join_error', { message: 'Öğretmen oyundan ayrıldı. Oda kapatıldı.' });
                     delete rooms[roomCode];
-                }, 60000); // 60 Saniye süre verir
-
+                }, 60000); 
             } else if (room.players[socket.id]) {
-                // ÖĞRENCİ KOPTU: Hayalet oyuncu olarak kalır (Puanı ve ismi silinmez)
-                room.players[socket.id].status = 'left';
+                // Öğrenci koparsa "disconnected" (Koptu) yap. Oyunu BİTİRME. Bekle!
+                room.players[socket.id].status = 'disconnected';
                 requestLeaderboardUpdate(roomCode);
-                checkIfGameOver(roomCode);
             }
         }
     });
 });
 
-// Port Dinleme
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => { console.log(`Server Online - Port: ${PORT}`); });
