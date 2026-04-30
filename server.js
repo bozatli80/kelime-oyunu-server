@@ -96,6 +96,56 @@ io.on('connection', (socket) => {
         }
     });
 
+    // --- ÖĞRENCİ YENİDEN BAĞLANMA (TAB DEĞİŞTİRME / EKRAN KAPANMA KORUMASI) ---
+    socket.on('student_reconnect', (data) => {
+        const { roomCode, playerName } = data;
+        const room = rooms[roomCode];
+
+        if (room) {
+            // Öğrencinin adından eski kimliğini (socket.id) bul
+            const oldSocketId = Object.keys(room.players).find(key => room.players[key].name === playerName);
+
+            if (oldSocketId) {
+                // Eski veriyi al
+                let playerObj = room.players[oldSocketId];
+                
+                // Eğer öğrenci çoktan atılmışsa (kick) geri alama
+                if(!playerObj) return;
+
+                // ID'leri güncelle
+                playerObj.id = socket.id;
+                playerObj.status = room.status === 'playing' ? 'playing' : 'waiting'; // Durumu güncelle
+                
+                // Eski ID'yi sil, yeni ID ile kaydet
+                delete room.players[oldSocketId];
+                room.players[socket.id] = playerObj;
+
+                socket.join(roomCode); // Soket odasına tekrar sok
+
+                // Öğrenciye başarılı şekilde bağlandığını bildir
+                socket.emit('join_success', { roomCode: roomCode });
+
+                // EĞER OYUN ÇOKTAN BAŞLAMIŞSA, ÖĞRENCİYE KALDIĞI SORUYU GÖNDER!
+                if (room.status === 'playing') {
+                    socket.emit('game_starting'); // Ekranı oyuna geçir
+                    
+                    // 1 saniye sonra sorusunu yolla (arayüz otursun diye)
+                    setTimeout(() => {
+                        sendIndividualQuestion(roomCode, socket.id);
+                    }, 1000);
+                } else {
+                    // Lobi ekranındaysa listeyi güncelle
+                    io.to(roomCode).emit('lobby_update', Object.values(room.players));
+                }
+            } else {
+                // Eski kaydı yoksa sıfırdan girmesi gerektiğini söyle
+                socket.emit('join_error', { message: 'Bağlantınız tamamen koptu. Lütfen tekrar isim yazarak girin.' });
+            }
+        } else {
+            socket.emit('join_error', { message: 'Oda kapandı veya bulunamadı.' });
+        }
+    });
+
     // --- 4. ODAYA KATILMA (ÖĞRENCİ) ---
     socket.on('join_room', (data) => {
         const { roomCode, playerName } = data;
