@@ -8,14 +8,13 @@ app.use(cors());
 
 const server = http.createServer(app);
 const io = new Server(server, {
-    cors: { origin: "*", methods: ["GET", "POST"] }
+    cors: { origin: "*", methods:["GET", "POST"] }
 });
 
 const rooms = {};
-const leaderboardTimers = {}; // Sıralama güncellemelerini yavaşlatıp sunucuyu korur
+const leaderboardTimers = {}; 
 
-// Küfür Filtresi (Eğer öğrenci bu kelimelerle girmeye çalışırsa reddedilir)
-const badWords = ["amk", "aq", "oç", "sik", "siktir", "pic", "yavsak", "fuck", "bitch", "pussy"];
+const badWords =["amk", "aq", "oç", "sik", "siktir", "pic", "yavsak", "fuck", "bitch", "pussy"];
 function isNameClean(name) {
     const cleanName = name.replace(/[^a-zA-Zğüşıöç]/gi, '').toLowerCase();
     return !badWords.some(word => cleanName.includes(word));
@@ -24,13 +23,14 @@ function isNameClean(name) {
 io.on('connection', (socket) => {
     
     // --- 1. ODA OLUŞTURMA (ÖĞRETMEN) ---
-    socket.on('create_room', () => {
+    socket.on('create_room', (data) => {
         const roomCode = Math.floor(100000 + Math.random() * 900000).toString();
         rooms[roomCode] = { 
             teacherSocketId: socket.id,
-            teacherDisconnectTimeout: null, // Kopma toleransı (Sayfa yenileme için)
+            teacherDisconnectTimeout: null, 
+            classLevel: data && data.classLevel ? data.classLevel : '', // YENİ: Sınıf eklendi
             players: {}, 
-            questions: [], 
+            questions:[], 
             status: 'waiting' 
         };
         socket.join(roomCode); 
@@ -43,22 +43,19 @@ io.on('connection', (socket) => {
         const room = rooms[roomCode];
         
         if (room) {
-            // Eğer öğretmen için silinme sayacı başladıysa iptal et
             if (room.teacherDisconnectTimeout) {
                 clearTimeout(room.teacherDisconnectTimeout);
                 room.teacherDisconnectTimeout = null;
             }
 
-            room.teacherSocketId = socket.id; // Yeni soketi kaydet
+            room.teacherSocketId = socket.id; 
             socket.join(roomCode);
             
-            // Öğretmene odanın güncel durumunu gönder (Ön yüze yansır)
             socket.emit('teacher_reconnected_success', {
                 status: room.status,
                 players: Object.values(room.players)
             });
 
-            // Ekranı güncelle
             if (room.status === 'waiting') {
                 socket.emit('lobby_update', Object.values(room.players));
             } else if (room.status === 'playing') {
@@ -72,20 +69,14 @@ io.on('connection', (socket) => {
         const { roomCode, playerId } = data;
         const room = rooms[roomCode];
 
-        // İsteğin gerçekten o odanın öğretmeninden geldiğinden emin ol
         if (room && room.teacherSocketId === socket.id) {
             if (room.players[playerId]) {
-                // 1. Hedef öğrenciye atıldığını bildir (Öğrenci ana sayfaya atılır)
                 io.to(playerId).emit('kicked_out', 'Öğretmen tarafından odadan çıkarıldınız.');
-                
-                // 2. Odanın hafızasından sil
                 delete room.players[playerId];
 
-                // 3. Hedef öğrenciyi Socket.io odasından çıkar
                 const targetSocket = io.sockets.sockets.get(playerId);
                 if (targetSocket) targetSocket.leave(roomCode);
 
-                // 4. Öğretmenin ve diğer öğrencilerin listesini anında güncelle
                 if (room.status === 'waiting') {
                     io.to(roomCode).emit('lobby_update', Object.values(room.players));
                 } else if (room.status === 'playing') {
@@ -98,7 +89,7 @@ io.on('connection', (socket) => {
 
     // --- 4. ODAYA KATILMA (ÖĞRENCİ) ---
     socket.on('join_room', (data) => {
-        const { roomCode, playerName } = data;
+        const { roomCode, playerName, playerSection } = data; // YENİ: playerSection eklendi
         const room = rooms[roomCode];
 
         if (!room) return socket.emit('join_error', { message: '❌ Oda bulunamadı veya süresi doldu!' });
@@ -109,6 +100,7 @@ io.on('connection', (socket) => {
         room.players[socket.id] = {
             id: socket.id,
             name: playerName,
+            section: playerSection || 'A', // YENİ: Şube Kaydediliyor
             score: 0,
             combo: 0,
             correct: 0, 
@@ -130,7 +122,6 @@ io.on('connection', (socket) => {
             room.questions = questions;
             room.status = 'playing';
             
-            // Her öğrenci için soruları karıştır
             Object.keys(room.players).forEach(pId => {
                 let order = Array.from({length: questions.length}, (_, i) => i);
                 room.players[pId].shuffledOrder = order.sort(() => Math.random() - 0.5);
@@ -139,7 +130,6 @@ io.on('connection', (socket) => {
 
             io.to(roomCode).emit('game_starting');
             
-            // 4.5 Saniye sonra ilk soruları gönder (3-2-1 Fight sesi bitsin diye)
             setTimeout(() => {
                 Object.keys(room.players).forEach(pId => sendIndividualQuestion(roomCode, pId));
             }, 4500);
@@ -152,7 +142,6 @@ io.on('connection', (socket) => {
         if (!room) return;
         const player = room.players[pId];
         
-        // Soruları bitirmişse veya kopmuşsa bitir
         if (!player || player.currentIndex >= room.questions.length) {
             if(player && player.status !== 'left') player.status = 'finished';
             io.to(pId).emit('player_finished');
@@ -178,7 +167,6 @@ io.on('connection', (socket) => {
         const room = rooms[roomCode];
         if (!room) return;
         
-        // Herkes bitirdi mi (finished) veya koptu mu (left) kontrolü
         const allFinished = Object.values(room.players).every(p => p.status === 'finished' || p.status === 'left');
         
         if (allFinished && Object.keys(room.players).length > 0) {
@@ -212,18 +200,17 @@ io.on('connection', (socket) => {
         } else {
             player.wrong++;
             player.combo = 0;
-            player.score = Math.max(0, player.score - 500); // YANLIŞ CEVAP -500 PUAN
+            player.score = Math.max(0, player.score - 500); 
             socket.emit('answer_feedback', { isCorrect: false, earnedPoints: -500, totalScore: player.score, combo: 0 });
         }
         
         requestLeaderboardUpdate(roomCode);
         player.currentIndex++;
         
-        // 1.5 Saniye sonra diğer soruya geç (Cevabın görülmesi için bekleme)
         setTimeout(() => sendIndividualQuestion(roomCode, socket.id), 1500);
     });
 
-    // --- LİDERLİK TABLOSUNU YAVAŞLATARAK GÜNCELLE (Sunucu Performansı İçin) ---
+    // --- LİDERLİK TABLOSUNU YAVAŞLATARAK GÜNCELLE ---
     function requestLeaderboardUpdate(roomCode) {
         if (leaderboardTimers[roomCode]) return;
         leaderboardTimers[roomCode] = setTimeout(() => {
@@ -232,7 +219,7 @@ io.on('connection', (socket) => {
                 io.to(roomCode).emit('update_leaderboard', Object.values(room.players).sort((a,b) => b.score - a.score));
             }
             delete leaderboardTimers[roomCode];
-        }, 1000); // Saniyede sadece 1 kez tüm sınıfa veri yollar (Sunucuyu çökmesini engeller)
+        }, 1000); 
     }
 
     // --- ÖĞRETMEN OYUNU ZORLA BİTİRİR ---
@@ -251,14 +238,12 @@ io.on('connection', (socket) => {
             const room = rooms[roomCode];
             
             if (room.teacherSocketId === socket.id) {
-                // ÖĞRETMEN KOPTU VEYA SAYFAYI YENİLEDİ: Hemen silme, 60 saniye bekle!
                 room.teacherDisconnectTimeout = setTimeout(() => {
                     io.to(roomCode).emit('join_error', { message: 'Öğretmen oyundan ayrıldı. Oda kapatıldı.' });
                     delete rooms[roomCode];
-                }, 60000); // 60 Saniye süre verir
+                }, 60000); 
 
             } else if (room.players[socket.id]) {
-                // ÖĞRENCİ KOPTU: Hayalet oyuncu olarak kalır (Puanı ve ismi silinmez)
                 room.players[socket.id].status = 'left';
                 requestLeaderboardUpdate(roomCode);
                 checkIfGameOver(roomCode);
@@ -267,6 +252,5 @@ io.on('connection', (socket) => {
     });
 });
 
-// Port Dinleme
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => { console.log(`Server Online - Port: ${PORT}`); });
