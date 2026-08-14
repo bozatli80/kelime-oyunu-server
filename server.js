@@ -307,6 +307,13 @@ io.on('connection', (socket) => {
                 room.players[socket.id].status = 'left';
                 requestLeaderboardUpdate(roomCode);
                 checkIfGameOver(roomCode);
+
+                // BELLEK KORUMA: Odada aktif kimse kalmadıysa odayı sil
+                const activePlayers = Object.values(room.players).filter(p => p.status === 'waiting' || p.status === 'playing');
+                if (activePlayers.length === 0 && !room.teacherSocketId) {
+                    delete rooms[roomCode];
+                    console.log(`Oda bosaldi ve RAM'den silindi: ${roomCode}`);
+                }
             }
         }
     });
